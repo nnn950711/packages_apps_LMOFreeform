@@ -68,6 +68,14 @@ class FreeformWindow(
             defaultDisplayWidth = context.resources.displayMetrics.widthPixels
             defaultDisplayHeight = context.resources.displayMetrics.heightPixels
             defaultDisplayRotation = context.display.rotation
+            
+            val newRefreshRate = getMaxRefreshRate()
+            if (newRefreshRate != freeformConfig.refreshRate) {
+                dlog(TAG, "Refresh rate changed from ${freeformConfig.refreshRate} to $newRefreshRate Hz")
+                freeformConfig.refreshRate = newRefreshRate
+                freeformConfig.presentationDeadlineNanos = calculatePresentationDeadline(newRefreshRate)
+            }
+            
             measureSize()
             handler.post {
                 changeOrientation()
@@ -75,12 +83,14 @@ class FreeformWindow(
                 else makeSureFreeformInScreen()
             }
             measureScale()
+            
             LMOFreeformServiceHolder.resizeFreeform(
                 this@FreeformWindow,
                 freeformConfig.freeformWidth,
                 freeformConfig.freeformHeight,
                 freeformConfig.densityDpi
             )
+            
             freeformView?.surfaceTexture?.setDefaultBufferSize(
                 freeformConfig.freeformWidth,
                 freeformConfig.freeformHeight
@@ -127,13 +137,28 @@ class FreeformWindow(
 
     override fun onSurfaceTextureAvailable(surfaceTexture: SurfaceTexture, width: Int, height: Int) {
         dlog(TAG, "onSurfaceTextureAvailable width:$width height:$height")
+        
+        surfaceTexture.setDefaultBufferSize(freeformConfig.freeformWidth, freeformConfig.freeformHeight)
+        
+        try {
+            val method = SurfaceTexture::class.java.getDeclaredMethod(
+                "setMaxAcquiredBufferCount", 
+                Int::class.javaPrimitiveType
+            )
+            method.isAccessible = true
+            method.invoke(surfaceTexture, 3)
+            dlog(TAG, "Enabled triple buffering for SurfaceTexture")
+        } catch (e: Exception) {
+            Slog.w(TAG, "Could not enable triple buffering (API may not support it): $e")
+        }
+        
         if (displayId < 0) {
             LMOFreeformServiceHolder.createDisplay(freeformConfig, appConfig, Surface(surfaceTexture), this)
         }
-        surfaceTexture.setDefaultBufferSize(freeformConfig.freeformWidth, freeformConfig.freeformHeight)
     }
 
     override fun onSurfaceTextureSizeChanged(surfaceTexture: SurfaceTexture, width: Int, height: Int) {
+        dlog(TAG, "onSurfaceTextureSizeChanged width:$width height:$height")
         surfaceTexture.setDefaultBufferSize(freeformConfig.freeformWidth, freeformConfig.freeformHeight)
     }
 
@@ -254,16 +279,69 @@ class FreeformWindow(
     }
 
     /**
+    * Get the maximum refresh rate supported by the device
+    */
+    private fun getMaxRefreshRate(): Float {
+        return try {
+            val display = context.display ?: return 60.0f
+            val supportedModes = display.supportedModes
+            
+            if (supportedModes.isEmpty()) {
+                dlog(TAG, "No supported modes found, using default 60Hz")
+                return 60.0f
+            }
+            
+            val currentMode = display.mode
+            val maxMode = supportedModes
+                .filter { 
+                    it.physicalWidth == currentMode.physicalWidth && 
+                    it.physicalHeight == currentMode.physicalHeight 
+                }
+                .maxByOrNull { it.refreshRate }
+                ?: supportedModes.maxByOrNull { it.refreshRate }
+            
+            val maxRate = maxMode?.refreshRate ?: 60.0f
+            
+            val clampedRate = maxRate.coerceIn(60.0f, 240.0f)
+            
+            dlog(TAG, "Device max refresh rate: $maxRate Hz, using: $clampedRate Hz")
+            dlog(TAG, "Supported modes: ${supportedModes.joinToString { 
+                "${it.physicalWidth}x${it.physicalHeight}@${it.refreshRate}Hz" 
+            }}")
+            
+            clampedRate
+        } catch (e: Exception) {
+            Slog.e(TAG, "Failed to get max refresh rate, using 60Hz fallback", e)
+            60.0f
+        }
+    }
+
+    /**
+    * Calculate optimal presentation deadline based on refresh rate
+    */
+    private fun calculatePresentationDeadline(refreshRate: Float): Long {
+        val frameTimeNs = (1_000_000_000.0 / refreshRate).toLong()
+        val bufferNs = (frameTimeNs * 0.2).toLong()
+        return frameTimeNs + bufferNs
+    }
+
+    /**
      * get freeform screen dimen / freeform view dimen
      */
     private fun populateFreeformConfig() {
         measureSize()
         measureScale()
         context.display.getDisplayInfo(defaultDisplayInfo)
+        
+        val maxRefreshRate = getMaxRefreshRate()
+        
         freeformConfig.apply {
-            refreshRate = defaultDisplayInfo.refreshRate
-            presentationDeadlineNanos = defaultDisplayInfo.presentationDeadlineNanos
-            dlog(TAG, "populateFreeformConfig: $this")
+            refreshRate = maxRefreshRate
+            presentationDeadlineNanos = calculatePresentationDeadline(maxRefreshRate)
+            
+            dlog(TAG, "populateFreeformConfig: refreshRate=$refreshRate Hz, " +
+                    "deadline=$presentationDeadlineNanos ns, " +
+                    "defaultInfo.refreshRate=${defaultDisplayInfo.refreshRate} Hz")
         }
     }
 

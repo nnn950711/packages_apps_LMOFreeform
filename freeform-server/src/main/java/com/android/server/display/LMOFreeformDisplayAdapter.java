@@ -62,16 +62,44 @@ public class LMOFreeformDisplayAdapter extends DisplayAdapter {
      * Create a freeform DisplayDevice
      */
     public void createFreeformLocked(String name, ILMOFreeformDisplayCallback callback,
-                                     int width, int height, int densityDpi,
-                                     boolean secure, boolean ownContentOnly, boolean shouldShowSystemDecorations,
-                                     Surface surface, float refreshRate, long presentationDeadlineNanos) {
+                                    int width, int height, int densityDpi,
+                                    boolean secure, boolean ownContentOnly, boolean shouldShowSystemDecorations,
+                                    Surface surface, float refreshRate, long presentationDeadlineNanos) {
         synchronized (getSyncRoot()) {
             IBinder appToken = callback.asBinder();
             FreeformFlags flags = new FreeformFlags(secure, ownContentOnly, shouldShowSystemDecorations);
-	    IBinder displayToken = DisplayControl.createVirtualDisplay(name, flags.mSecure, false /* optimizeForPower */, UNIQUE_ID_PREFIX + name, refreshRate);
-            FreeformDisplayDevice device = new FreeformDisplayDevice(displayToken, UNIQUE_ID_PREFIX + name, width, height, densityDpi,
-                    refreshRate, presentationDeadlineNanos,
-                    flags, surface, new Callback(callback, mHandler), callback.asBinder());
+            
+            if (refreshRate < 60.0f || refreshRate > 240.0f) {
+                Slog.w(TAG, "Invalid refresh rate " + refreshRate + " Hz, clamping to valid range");
+                refreshRate = Math.max(60.0f, Math.min(refreshRate, 240.0f));
+            }
+            
+            long minDeadline = (long)(1_000_000_000.0 / 240.0);
+            long maxDeadline = (long)(1_000_000_000.0 / 60.0);
+            if (presentationDeadlineNanos < minDeadline || presentationDeadlineNanos > maxDeadline) {
+                presentationDeadlineNanos = (long)(1_000_000_000.0 / refreshRate);
+                Slog.w(TAG, "Adjusted presentation deadline to " + presentationDeadlineNanos + " ns");
+            }
+            
+            Slog.i(TAG, "Creating freeform display: " + name + 
+                        " with refresh rate: " + refreshRate + " Hz, " +
+                        "deadline: " + presentationDeadlineNanos + " ns, " +
+                        "size: " + width + "x" + height + "@" + densityDpi + " dpi");
+            
+            IBinder displayToken = DisplayControl.createVirtualDisplay(
+                name, 
+                flags.mSecure, 
+                false /* optimizeForPower */, 
+                UNIQUE_ID_PREFIX + name, 
+                refreshRate
+            );
+            
+            FreeformDisplayDevice device = new FreeformDisplayDevice(
+                displayToken, UNIQUE_ID_PREFIX + name, 
+                width, height, densityDpi,
+                refreshRate, presentationDeadlineNanos,
+                flags, surface, new Callback(callback, mHandler), callback.asBinder()
+            );
 
             sendDisplayDeviceEventLocked(device, DISPLAY_DEVICE_EVENT_ADDED);
             mFreeformDisplayDevices.put(appToken, device);
@@ -243,9 +271,13 @@ public class LMOFreeformDisplayAdapter extends DisplayAdapter {
                 mInfo.densityDpi = mDensityDpi;
                 mInfo.xDpi = mDensityDpi;
                 mInfo.yDpi = mDensityDpi;
+                
                 mInfo.presentationDeadlineNanos = mDisplayPresentationDeadlineNanos +
-                        1000000000L / (int) mRefreshRate;   // display's deadline + 1 frame
-                //mInfo.flags = DisplayDeviceInfo.FLAG_PRESENTATION;
+                        (long)(1_000_000_000.0 / mRefreshRate);
+                
+                Slog.i(TAG, "Display device info: " + mInfo.width + "x" + mInfo.height +
+                            "@" + mRefreshRate + "Hz, deadline: " + mInfo.presentationDeadlineNanos + " ns");
+                
                 if (mFlags.mSecure) {
                     mInfo.flags |= DisplayDeviceInfo.FLAG_SECURE;
                 }
@@ -257,13 +289,11 @@ public class LMOFreeformDisplayAdapter extends DisplayAdapter {
                 }
                 mInfo.type = Display.TYPE_OVERLAY;
                 mInfo.touch = DisplayDeviceInfo.TOUCH_VIRTUAL;
-                // The display is trusted since it is created by system.
                 mInfo.flags |= FLAG_TRUSTED;
                 mInfo.displayShape = DisplayShape.createDefaultDisplayShape(mInfo.width, mInfo.height, false);
             }
             return mInfo;
         }
-    }
 
     /** Represents the flags of the freeform display. */
     protected static final class FreeformFlags {
